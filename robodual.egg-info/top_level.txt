@@ -1,8 +1,1 @@
-assets
-calvin
-downloaded_models
-experiments
-openvla
 prismatic
-scripts
-vla-scripts

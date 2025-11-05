@@ -312,7 +312,7 @@ def main(args):
         acc.process_index,
         eval_dir = eval_dir,
         ep_len = 360,
-        num_sequences = 3,
+        num_sequences = 2,
         enrich_lang=args.enrich_lang,
         debug = False,
     )).float().mean().to(device)
