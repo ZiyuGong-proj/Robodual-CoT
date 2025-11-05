@@ -504,9 +504,23 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         self.vocab_size = self.config.text_config.vocab_size - self.config.pad_to_multiple_of
 
     def predict_action(
-        self, input_ids: Optional[torch.LongTensor] = None, unnorm_key: Optional[str] = None, **kwargs: str
-    ) -> np.ndarray:
-        """Thin wrapper around super().generate() that decodes predicted actions and de-normalizes them."""
+        self, input_ids: Optional[torch.LongTensor] = None, unnorm_key: Optional[str] = None,
+        enable_cot: bool = False, max_cot_tokens: int = 100, **kwargs: str
+    ) -> tuple:
+        """
+        Thin wrapper around super().generate() that decodes predicted actions and de-normalizes them.
+
+        Args:
+            input_ids: Input token IDs
+            unnorm_key: Key for unnormalization statistics
+            enable_cot: If True, enables Chain-of-Thought generation before actions
+            max_cot_tokens: Maximum number of tokens for CoT reasoning (default: 100)
+            **kwargs: Additional generation arguments
+
+        Returns:
+            If enable_cot=False: (actions, hidden_states) tuple for backward compatibility
+            If enable_cot=True: (actions, hidden_states, cot_token_ids) tuple with CoT token IDs
+        """
 
         # We need to add this special empty token ('') after the colon (':') token in "ASSISTANT:"
         # in order for the predictions to match the training configuration and be accurate.
@@ -514,11 +528,40 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             (input_ids, torch.unsqueeze(torch.Tensor([29871]).long(), dim=0).to(input_ids.device)), dim=1
         )
 
-        # Run VLA inference
-        generated_ids = self.generate(input_ids, max_new_tokens=self.get_action_dim(unnorm_key), **kwargs)
+        # Determine max_new_tokens based on CoT setting
+        action_dim = self.get_action_dim(unnorm_key)
+        if enable_cot:
+            # Generate CoT + Actions: allocate extra tokens for reasoning
+            max_new_tokens = max_cot_tokens + action_dim
+        else:
+            max_new_tokens = action_dim
 
-        # Extract predicted action tokens and translate into (normalized) continuous actions
-        predicted_action_token_ids = generated_ids[0, -self.get_action_dim(unnorm_key) :].cpu().numpy()
+        # Run VLA inference with hidden states
+        output = self.generate(
+            input_ids,
+            max_new_tokens=max_new_tokens,
+            output_hidden_states=True,
+            return_dict_in_generate=True,
+            **kwargs
+        )
+        generated_ids = output.sequences
+        hidden_states = output.hidden_states
+
+        # Extract action tokens (always last action_dim tokens)
+        predicted_action_token_ids = generated_ids[0, -action_dim:].cpu().numpy()
+
+        # Extract CoT token IDs if enabled
+        cot_token_ids = None
+        if enable_cot:
+            # Extract CoT tokens (all generated tokens except the last action_dim tokens)
+            # Skip the input tokens and only look at newly generated tokens
+            input_length = input_ids.shape[1]
+            generated_only = generated_ids[0, input_length:]
+
+            if len(generated_only) > action_dim:
+                cot_token_ids = generated_only[:-action_dim].cpu()
+
+        # Decode action tokens to continuous actions
         discretized_actions = self.vocab_size - predicted_action_token_ids
         discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
         normalized_actions = self.bin_centers[discretized_actions]
@@ -533,7 +576,32 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             normalized_actions,
         )
 
-        return actions
+        # Extract hidden states for specialist (only action tokens)
+        # Get the last layer hidden states corresponding to action tokens
+        if hidden_states is not None and len(hidden_states) > 0:
+            # hidden_states is a tuple of tuples: (layer1_states, layer2_states, ...)
+            # Each layer_states is for one generation step
+            # We need to extract the last layer's states for the action tokens only
+            last_layer_states = []
+            num_generated = len(hidden_states)
+
+            # Collect hidden states only for the last action_dim tokens
+            for i in range(max(0, num_generated - action_dim), num_generated):
+                if i < len(hidden_states) and len(hidden_states[i]) > 0:
+                    # Get the last layer (-1) and last token position
+                    last_layer_states.append(hidden_states[i][-1][:, -1:, :])
+
+            if last_layer_states:
+                action_hidden_states = torch.cat(last_layer_states, dim=1)
+            else:
+                action_hidden_states = None
+        else:
+            action_hidden_states = None
+
+        if enable_cot:
+            return actions, action_hidden_states, cot_token_ids
+        else:
+            return actions, action_hidden_states
 
     @staticmethod
     def _check_unnorm_key(norm_stats: Dict[str, Dict[str, Any]], unnorm_key: Optional[str]) -> str:

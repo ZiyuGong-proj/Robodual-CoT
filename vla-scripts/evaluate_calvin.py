@@ -301,7 +301,13 @@ def main(args):
     #env = make_env(os.path.join(CALVIN_ROOT, 'dataset/task_ABC_D'), observation_space, device)
     env = make_env("/nvmeroot/repos/calvin/dataset/calvin_debug_dataset", observation_space, device)
 
-    eva = DualSystemCalvinEvaluation(dual_sys, processor, action_tokenizer)
+    eva = DualSystemCalvinEvaluation(
+        dual_sys,
+        processor,
+        action_tokenizer,
+        enable_cot=args.enable_cot,
+        max_cot_tokens=args.max_cot_tokens
+    )
     dual_sys.eval()
     avg_reward = torch.tensor(evaluate_policy(
         eva, 
@@ -411,6 +417,11 @@ if __name__ == "__main__":
     parser.add_argument("--with_tactile", default=False, action="store_true")
     parser.add_argument("--with_cfg", default=False, action="store_true")
     parser.add_argument("--enrich_lang", default=False, action="store_true")
+    # CoT arguments
+    parser.add_argument("--enable_cot", default=False, action="store_true",
+                        help="Enable Chain-of-Thought reasoning for generalist model")
+    parser.add_argument("--max_cot_tokens", default=100, type=int,
+                        help="Maximum number of tokens for CoT reasoning")
     args = parser.parse_args()
 
     main(args)

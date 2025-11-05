@@ -171,12 +171,28 @@ class TimingAggregator:
             return 0.0
         return 1.0 / mean
 
-def get_openvla_prompt(instruction: str, tokenized_action: str = None) -> str:
-    return f"In: What action should the robot take to {instruction.lower()}?\nOut:"
+def get_openvla_prompt(instruction: str, tokenized_action: str = None, enable_cot: bool = False) -> str:
+    """
+    Generate prompt for OpenVLA model.
+
+    Args:
+        instruction: Task instruction
+        tokenized_action: Optional tokenized action (for training)
+        enable_cot: If True, adds Chain-of-Thought trigger to prompt
+
+    Returns:
+        Formatted prompt string
+    """
+    base_question = f"What action should the robot take to {instruction.lower()}?"
+    if enable_cot:
+        # Zero-shot CoT: Add "Let's think step by step" to trigger reasoning
+        return f"In: {base_question} Let's think step by step.\nOut:"
+    else:
+        return f"In: {base_question}\nOut:"
 
 
 class DualSystemCalvinEvaluation(CalvinBaseModel):
-    def __init__(self, model, processor, action_tokenizer):
+    def __init__(self, model, processor, action_tokenizer, enable_cot: bool = False, max_cot_tokens: int = 100):
         super().__init__()
 
         #self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -199,9 +215,17 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         self.processor = processor
         self.dual_sys = model
         self.dual_impl = getattr(self.dual_sys, "module", self.dual_sys)
-        
+
 
         self.action_tokenizer = action_tokenizer
+
+        # CoT configuration
+        self.enable_cot = enable_cot
+        self.max_cot_tokens = max_cot_tokens
+        if enable_cot:
+            print(f"\n{'='*80}")
+            print(f"Chain-of-Thought (CoT) enabled with max_cot_tokens={max_cot_tokens}")
+            print(f"{'='*80}\n")
 
         self.temporal_size = 8
         self._generalist_refresh_interval = 2
@@ -271,9 +295,30 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
 
                 streamer = ActionTokenTimingStreamer(device=self.device)
                 streamer.start()
-                action, hidden_states = self.dual_impl.slow_system.predict_action(
-                    streamer=streamer, do_sample=False, **inputs
+
+                # Call predict_action with CoT settings
+                result = self.dual_impl.slow_system.predict_action(
+                    streamer=streamer,
+                    do_sample=False,
+                    enable_cot=self.enable_cot,
+                    max_cot_tokens=self.max_cot_tokens,
+                    **inputs
                 )
+
+                # Handle result based on whether CoT is enabled
+                if self.enable_cot:
+                    action, hidden_states, cot_token_ids = result
+                    # Decode and print CoT reasoning
+                    if cot_token_ids is not None and len(cot_token_ids) > 0:
+                        cot_text = self.processor.tokenizer.decode(cot_token_ids, skip_special_tokens=True)
+                        print(f"\n{'='*80}")
+                        print(f"[CoT][Step {step_index}] Generalist Reasoning:")
+                        print(f"{'-'*80}")
+                        print(cot_text)
+                        print(f"{'='*80}\n")
+                else:
+                    action, hidden_states = result
+
                 streamer.finalize()
                 timing_metrics = streamer.get_metrics()
                 if timing_metrics is not None:
@@ -408,7 +453,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         depth_image = torch.from_numpy(obs["depth_obs"]['depth_static']).unsqueeze(0).to(self.device) - self.depth_min / (self.depth_max - self.depth_min)
         depth_gripper = torch.from_numpy(obs["depth_obs"]['depth_gripper']).unsqueeze(0).to(self.device) - self.gripper_depth_min / (self.gripper_depth_max - self.gripper_depth_min)
 
-        prompt = get_openvla_prompt(instruction)
+        prompt = get_openvla_prompt(instruction, enable_cot=self.enable_cot)
         inputs = self.processor(prompt, Image.fromarray(image)).to(self.device, dtype=torch.bfloat16)
 
 
