@@ -76,26 +76,26 @@ hist_action          # (1, 4, 7) = 112 bytes (FP32)
 
 #### 3. 模型结构带宽需求 / Model Architecture Bandwidth
 
-**代码位置**: `prismatic/models/policy/diffusion_policy.py:16-96`
+**代码位置**: `prismatic/models/policy/diffusion_policy.py:35-121`
 
 System-1 使用 **DiT-Tiny** 架构，带宽密集的操作包括：
 
 1. **Vision Encoder (DINO ViT-Small)**
    - 参数量: ~22M
    - 每次前向需要处理多个图像
-   - 代码: `diffusion_policy.py:60-70, 182-186`
+   - 代码: `diffusion_policy.py:86-93, 234-244`
 
 2. **Depth Encoder (ViT)**
    - 处理深度图像
-   - 代码: `diffusion_policy.py:74-78, 188-191`
+   - 代码: `diffusion_policy.py:99-104, 246-248`
 
 3. **DiT Denoising Steps**
    - 默认采样步数: 5-10步 (可配置)
    - 每步需要完整的Transformer前向传播
-   - 代码: `diffusion_policy.py:118-151`
+   - 代码: `diffusion_policy.py:134-167`
 
 ```python
-# 代码位置: diffusion_policy.py:118-151
+# 代码位置: diffusion_policy.py:134-167
 for t in scheduler.timesteps:  # 默认5-10次迭代
     model_output = model(trajectory, t, 
                         cond=local_cond,
@@ -112,7 +112,7 @@ for t in scheduler.timesteps:  # 默认5-10次迭代
 
 1. **CPU → GPU 数据传输**
    ```python
-   # 代码位置: dual_sys_evaluation.py:446-454
+   # 代码位置: dual_sys_evaluation.py:486-508
    gripper_image = self.processor.image_processor.apply_transform(
        Image.fromarray(gripper_image))[:3].unsqueeze(0).to(self.device)
    depth_image = torch.from_numpy(obs["depth_obs"]['depth_static']).unsqueeze(0).to(self.device)
@@ -131,7 +131,7 @@ for t in scheduler.timesteps:  # 默认5-10次迭代
 
 ### System-2 (Generalist / 慢速系统) 对比
 
-**代码位置**: `vla-scripts/dual_sys_evaluation.py:299-306`
+**代码位置**: `vla-scripts/dual_sys_evaluation.py:330-336`
 
 ```python
 # System-2 每 _generalist_refresh_interval 步执行一次（默认=2）
@@ -188,7 +188,7 @@ result = self.dual_impl.slow_system.predict_action(
 
 ### 实际测量指标
 
-在 `vla-scripts/dual_sys_evaluation.py:547-580` 中可以看到延迟统计：
+在 `vla-scripts/dual_sys_evaluation.py:618-626` 中可以看到延迟统计：
 
 ```python
 def timing_summaries(self) -> dict:
@@ -248,13 +248,13 @@ def timing_summaries(self) -> dict:
 
 | 主题 | 文件路径 | 行号 |
 |------|---------|------|
-| System-1 推理入口 | `vla-scripts/dual_sys_evaluation.py` | 505-517 |
-| System-2 推理入口 | `vla-scripts/dual_sys_evaluation.py` | 299-306 |
-| System-1 模型定义 | `prismatic/models/policy/diffusion_policy.py` | 16-96 |
-| 扩散推理循环 | `prismatic/models/policy/diffusion_policy.py` | 118-151 |
-| 数据输入准备 | `vla-scripts/dual_sys_evaluation.py` | 446-516 |
-| 推理频率控制 | `vla-scripts/dual_sys_evaluation.py` | 466 |
-| 延迟统计 | `vla-scripts/dual_sys_evaluation.py` | 547-580 |
+| System-1 推理入口 | `vla-scripts/dual_sys_evaluation.py` | 573-585 |
+| System-2 推理入口 | `vla-scripts/dual_sys_evaluation.py` | 330-336 |
+| System-1 模型定义 | `prismatic/models/policy/diffusion_policy.py` | 35-121 |
+| 扩散推理循环 | `prismatic/models/policy/diffusion_policy.py` | 134-167 |
+| 数据输入准备 | `vla-scripts/dual_sys_evaluation.py` | 486-560 |
+| 推理频率控制 | `vla-scripts/dual_sys_evaluation.py` | 517-524 |
+| 延迟统计 | `vla-scripts/dual_sys_evaluation.py` | 618-626 |
 
 ---
 
