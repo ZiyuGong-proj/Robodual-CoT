@@ -23,7 +23,7 @@
 
 #### 1. 推理频率 / Inference Frequency
 
-**代码位置**: `vla-scripts/dual_sys_evaluation.py:506-516`
+**代码位置**: `vla-scripts/dual_sys_evaluation.py:563-586`
 
 ```python
 # System-1 在每个步骤都执行推理
@@ -43,7 +43,7 @@ self._specialist_stats.update(time.perf_counter() - specialist_start)
 ```
 
 **特点**:
-- **执行频率**: 每个控制步都执行（~每步1次）
+- **执行频率**: 每个控制步都执行（30-50 Hz典型频率）
 - **无缓存机制**: 每次都需要完整的前向传播
 - System-2每2步执行一次（默认），但System-1每步都执行
 
@@ -67,7 +67,7 @@ System-1 每次推理需要处理以下数据：
 ##### 其他数据
 
 ```python
-# 代码位置: vla-scripts/dual_sys_evaluation.py:454-515
+# 代码位置: vla-scripts/dual_sys_evaluation.py:539-560
 ref_actions          # (1, 8, 7) = 224 bytes (FP32)
 action_cond (hidden) # (1, 8, 768) = 24,576 bytes (FP32) - 来自System-2
 proprio (robot state)# (1, 7) = 28 bytes (FP32)

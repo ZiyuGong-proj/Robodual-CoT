@@ -238,7 +238,7 @@ class DiffusionDiTImagePolicy(nn.Module):
                 visual_embedding = self.vision_encoder.forward_feature(obs.permute(0,2,3,1) * 0.5 + 0.5) 
         elif self.encoder_type == 'DINO':
             if isinstance(obs, tuple):
-                # Process both current and previous frames
+                # Process all images in the observation tuple (typically current and previous frames)
                 visual_embedding = torch.stack([self.vision_encoder.forward_features(image) for image in obs], dim=1)
             else:
                 visual_embedding = self.vision_encoder.forward_features(obs) 

@@ -254,7 +254,8 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         self.temporal_size = 8
         
         # BANDWIDTH OPTIMIZATION: System-2 runs every N steps instead of every step
-        # This reduces overall bandwidth by allowing System-1 to reuse hidden states
+        # This reduces overall bandwidth by allowing System-1 to reuse the same
+        # hidden states FROM System-2 across multiple control cycles
         # Default: 2 (System-2 runs at 15-25 Hz while System-1 runs at 30-50 Hz)
         self._generalist_refresh_interval = 2
         
