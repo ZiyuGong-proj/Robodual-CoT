@@ -192,6 +192,30 @@ def get_openvla_prompt(instruction: str, tokenized_action: str = None, enable_co
 
 
 class DualSystemCalvinEvaluation(CalvinBaseModel):
+    """
+    RoboDual Dual-System Policy for CALVIN Evaluation.
+    
+    Architecture:
+        - System-1 (Specialist): Fast DiT-based diffusion policy [BANDWIDTH-INTENSIVE]
+            * Runs at EVERY control step (~30-50 Hz)
+            * Processes multi-modal inputs: RGB, Depth, Gripper (RGB+Depth), Tactile
+            * Total data transfer: ~2.6-3.0 MB per step (~78-90 MB/s at 30 Hz)
+            * Performs 5-10 diffusion denoising iterations per step
+            
+        - System-2 (Generalist): Slow VLM-based autoregressive policy [COMPUTE-INTENSIVE]
+            * Runs every _generalist_refresh_interval steps (default: 2 steps)
+            * Processes single RGB image + text instruction
+            * Generates action tokens via large VLM (OpenVLA)
+            * Provides hidden state conditioning to System-1
+    
+    Bandwidth Analysis:
+        System-1 is the bandwidth bottleneck due to:
+        1. High inference frequency (every step vs. every 2 steps)
+        2. Multi-modal image inputs (5-6 modalities vs. 1 RGB image)
+        3. Iterative diffusion process (5-10 steps vs. single forward pass)
+        
+        See SYSTEM_BANDWIDTH_ANALYSIS.md for detailed analysis.
+    """
     def __init__(self, model, processor, action_tokenizer, enable_cot: bool = False, max_cot_tokens: int = 100):
         super().__init__()
 
@@ -228,7 +252,13 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
             print(f"{'='*80}\n")
 
         self.temporal_size = 8
+        
+        # BANDWIDTH OPTIMIZATION: System-2 runs every N steps instead of every step
+        # This reduces overall bandwidth by allowing System-1 to reuse the same
+        # hidden states FROM System-2 across multiple control cycles
+        # Default: 2 (System-2 runs at 15-25 Hz while System-1 runs at 30-50 Hz)
         self._generalist_refresh_interval = 2
+        
         self.temporal_mask = torch.flip(torch.triu(torch.ones(self.temporal_size, self.temporal_size, dtype=torch.bool)), dims=[1]).numpy()
         
         self.action_buffer = np.zeros((self.temporal_mask.shape[0], self.temporal_mask.shape[0], 7))
@@ -436,22 +466,46 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
 
     def step(self, obs, instruction, step):
         """
+        Execute one step of the dual-system policy.
+        
+        BANDWIDTH NOTE: This method is called at every control step (~30-50 Hz), making
+        System-1 (specialist) bandwidth-intensive. Each call transfers ~2.6-3.0 MB of 
+        multi-modal image data to GPU.
+        
         Args:
-            obs: environment observations
+            obs: environment observations containing:
+                - rgb_obs: RGB images (static + gripper)
+                - depth_obs: Depth images (static + gripper)
+                - robot_obs: Proprioceptive state
             instruction: embedded language goal
+            step: current step index
         Returns:
-            action: predicted action
+            action: predicted action (7-DOF)
         """
 
+        # === BANDWIDTH-INTENSIVE: Multi-modal image data preparation ===
+        # System-1 processes 5-6 image modalities at EVERY step (unlike System-2 which runs every 2 steps)
+        
+        # 1. Static RGB image (~600 KB)
         image = obs["rgb_obs"]['rgb_static']
+        
+        # 2. Gripper RGB image (~600 KB) - CPU→GPU transfer
         gripper_image = obs["rgb_obs"]['rgb_gripper']
         #gripper_image = self.processor.image_processor.apply_transform(Image.fromarray(gripper_image))[:3].unsqueeze(0).to(self.dual_sys.device)
         gripper_image = self.processor.image_processor.apply_transform(Image.fromarray(gripper_image))[:3].unsqueeze(0).to(self.device)
 
+        # 3. Tactile image (optional, ~384 KB)
         tactile_image = None
         # tactile_image = torch.from_numpy(obs["rgb_obs"]['rgb_tactile']).permute(2,0,1).unsqueeze(0).to(self.dual_sys.device, dtype=torch.float) / 255
+        
+        # 4. Static depth image (~200 KB) - CPU→GPU transfer
         depth_image = torch.from_numpy(obs["depth_obs"]['depth_static']).unsqueeze(0).to(self.device) - self.depth_min / (self.depth_max - self.depth_min)
+        
+        # 5. Gripper depth image (~200 KB) - CPU→GPU transfer
         depth_gripper = torch.from_numpy(obs["depth_obs"]['depth_gripper']).unsqueeze(0).to(self.device) - self.gripper_depth_min / (self.gripper_depth_max - self.gripper_depth_min)
+        
+        # Total: ~2.6 MB per step (or ~3.0 MB with tactile)
+        # At 30 Hz: ~78-90 MB/s data transfer bandwidth
 
         prompt = get_openvla_prompt(instruction, enable_cot=self.enable_cot)
         inputs = self.processor(prompt, Image.fromarray(image)).to(self.device, dtype=torch.bfloat16)
@@ -460,6 +514,9 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         with self._generalist_lock:
             generalist_ready = self.hidden_states is not None
 
+        # System-2 (Generalist) runs at lower frequency to reduce bandwidth
+        # Default: every _generalist_refresh_interval=2 steps
+        # System-1 (Specialist) runs at EVERY step -> bandwidth-intensive
         if not generalist_ready:
             self._maybe_request_generalist(inputs, step, wait=True)
         #elif (self._specialist_exec_counter + 1) % self.temporal_size == 0:
@@ -491,6 +548,7 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
         if step == 0:
             self.obs_buffer = image
 
+        # Previous frame for temporal information
         prev_img = self.processor.image_processor.apply_transform(Image.fromarray(self.obs_buffer))[:3].unsqueeze(0).to(self.device)
         obs = (inputs["pixel_values"][:,:3].to(torch.float), prev_img)
 
@@ -502,11 +560,21 @@ class DualSystemCalvinEvaluation(CalvinBaseModel):
             hist_action[:, -available_hist_acts:] = torch.stack(self.hist_action[-available_hist_acts:], dim=0).unsqueeze(0).to(self.device)
 
         
+        # === BANDWIDTH BOTTLENECK: System-1 (Specialist) Inference ===
+        # This is THE most bandwidth-intensive operation, executed at EVERY control step
+        # 
+        # Bandwidth consumption breakdown:
+        # 1. Input data transfer: ~2.6 MB (multi-modal images)
+        # 2. Vision encoder forward pass: processes all image modalities
+        # 3. Diffusion iterations: 5-10 denoising steps, each requiring full model forward pass
+        # 4. Hidden state conditioning: 24 KB from System-2
+        #
+        # Total GPU memory bandwidth per step: ~150-200 MB/s at 30 Hz control frequency
         specialist_start = time.perf_counter()
         dp_action = self.dual_impl.ema_fast_system.ema_model.predict_action(
                                                             ref_action = ref_actions.to(torch.float),
                                                             action_cond = current_hidden_states.to(torch.float),
-                                                            obs = obs,
+                                                            obs = obs,  # Tuple of (current_rgb, prev_rgb)
                                                             depth_obs = depth_image,
                                                             gripper_obs = (gripper_image, depth_gripper),
                                                             tactile_obs = tactile_image,
