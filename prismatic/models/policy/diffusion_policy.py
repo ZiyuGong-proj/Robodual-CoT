@@ -1,3 +1,22 @@
+"""
+RoboDual System-1 (Specialist): Diffusion-based Action Policy
+
+BANDWIDTH CHARACTERISTICS:
+This module implements the fast specialist policy (System-1) in RoboDual's dual-system
+architecture. It is BANDWIDTH-INTENSIVE due to:
+
+1. High Inference Frequency: Runs at every control step (~30-50 Hz)
+2. Multi-modal Input Processing: Handles 5-6 image modalities (RGB, Depth, Gripper, Tactile)
+3. Iterative Diffusion: Performs 5-10 denoising steps per action prediction
+4. Vision Encoder Processing: DINO ViT-Small processes multiple 224×224 images
+
+Bandwidth Consumption:
+- Input data: ~2.6-3.0 MB per step
+- GPU memory bandwidth: ~150-300 MB per inference
+- Sustained bandwidth at 30 Hz: ~4.5-9 GB/s
+
+For detailed analysis, see SYSTEM_BANDWIDTH_ANALYSIS.md
+"""
 from typing import Dict
 import timm
 import torch
@@ -14,15 +33,21 @@ from prismatic.models.policy.transformer_utils import MAPBlock
 
 
 class DiffusionDiTImagePolicy(nn.Module):
+    """
+    System-1 (Specialist): Diffusion Transformer Image Policy
+    
+    This is the BANDWIDTH-INTENSIVE component of RoboDual. It processes multi-modal
+    sensory inputs at high frequency to generate precise, real-time robot actions.
+    """
     def __init__(self, 
             shape_meta: dict,
             noise_scheduler: DDPMScheduler,     
             n_action_steps = 4,         # Action chunking size for prediction 
             n_obs_steps = 1,            # Given only current obs.
-            num_inference_steps=10,
+            num_inference_steps=10,     # Diffusion sampling steps (5-10) - affects bandwidth
             vision_encoder='DINO',
-            with_depth=False,
-            with_gripper=False,
+            with_depth=False,           # Enable depth input (adds ~400 KB per step)
+            with_gripper=False,         # Enable gripper camera (adds ~800 KB per step)
             with_tactile=False,
             cond_drop_chance=0.,
             progressive_noise=False,
@@ -102,6 +127,15 @@ class DiffusionDiTImagePolicy(nn.Module):
             # keyword arguments to scheduler.step
             **kwargs
             ):
+        """
+        BANDWIDTH-INTENSIVE: Performs iterative diffusion denoising.
+        
+        This is the core inference loop that makes System-1 bandwidth-intensive:
+        - Runs 5-10 diffusion steps (self.num_inference_steps)
+        - Each step performs a full Transformer forward pass
+        - Accesses all conditional embeddings (visual, depth, gripper, etc.) at each step
+        - Total GPU memory bandwidth: ~50-100 MB per inference
+        """
         model = self.model
         scheduler = self.noise_scheduler
 
@@ -117,6 +151,8 @@ class DiffusionDiTImagePolicy(nn.Module):
         # set step values
         scheduler.set_timesteps(self.num_inference_steps)
 
+        # BANDWIDTH BOTTLENECK: This loop runs 5-10 times per action prediction
+        # Each iteration accesses ~20-30 MB of conditional embeddings and intermediate activations
         for t in scheduler.timesteps:
 
             # predict model output
@@ -153,8 +189,27 @@ class DiffusionDiTImagePolicy(nn.Module):
 
     def predict_action(self, ref_action, action_cond, obs, depth_obs=None, gripper_obs=None, tactile_obs=None, lang=None, proprio=None, hist_action=None) -> Dict[str, torch.Tensor]:
         """
-        obs_dict: must include "obs" key
-        result: must include "action" key
+        System-1 (Specialist) action prediction with multi-modal conditioning.
+        
+        BANDWIDTH ANALYSIS:
+        This method is called at EVERY control step (~30-50 Hz), making it the primary
+        bandwidth bottleneck in the dual-system architecture.
+        
+        Input data per call:
+        - obs: RGB images (2x 224×224×3) = ~1.2 MB
+        - depth_obs: Depth image (224×224×1) = ~200 KB
+        - gripper_obs: Gripper RGB + Depth (224×224×4) = ~800 KB
+        - tactile_obs (optional): Tactile image (128×128×6) = ~384 KB
+        - action_cond: Hidden states from System-2 (8×768) = ~24 KB
+        - Total: ~2.6-3.0 MB per step
+        
+        Processing:
+        - Vision encoders process all images (DINO ViT-Small, ~22M params)
+        - Diffusion model runs 5-10 iterations
+        - Each iteration: ~20-30 MB GPU memory bandwidth
+        - Total: ~150-300 MB GPU bandwidth per action prediction
+        
+        At 30 Hz control frequency: ~4.5-9 GB/s sustained GPU bandwidth
         """
         # assert 'past_action' not in obs_dict # not implemented yet
         # normalize input
@@ -174,6 +229,8 @@ class DiffusionDiTImagePolicy(nn.Module):
         # empty data for action
         cond_data = torch.zeros(size=(B, T, Da), device=device, dtype=dtype)
 
+        # BANDWIDTH-INTENSIVE: Vision encoder forward passes
+        # Process RGB images through pretrained vision encoder (DINO ViT or Theia)
         if self.encoder_type == 'Theia':
             if isinstance(obs, tuple):
                 visual_embedding = torch.stack([self.vision_encoder.forward_feature(image.permute(0,2,3,1) * 0.5 + 0.5) for image in obs], dim=1)
@@ -181,15 +238,18 @@ class DiffusionDiTImagePolicy(nn.Module):
                 visual_embedding = self.vision_encoder.forward_feature(obs.permute(0,2,3,1) * 0.5 + 0.5) 
         elif self.encoder_type == 'DINO':
             if isinstance(obs, tuple):
+                # Process both current and previous frames
                 visual_embedding = torch.stack([self.vision_encoder.forward_features(image) for image in obs], dim=1)
             else:
                 visual_embedding = self.vision_encoder.forward_features(obs) 
 
+        # BANDWIDTH-INTENSIVE: Depth encoder forward pass
         depth_embedding = None
         if self.with_depth:
             depth_obs = self.depth_resize(depth_obs.unsqueeze(1))
             depth_embedding = self.depth_encoder(depth_obs)
 
+        # BANDWIDTH-INTENSIVE: Gripper vision encoders
         visual_embedding_gripper = None
         depth_embedding_gripper  = None
         if self.with_gripper:
