@@ -121,6 +121,9 @@ sh install.sh
 > #### Model
 - prismatic/models/policy/:
   - ```diffusion_policy.py```: Core implementation of our DiT action expert
+> #### Documentation
+- ```SYSTEM_BANDWIDTH_ANALYSIS.md```: Analysis of System-1 bandwidth characteristics (答：system1是带宽密集型 / Yes, System-1 is bandwidth-intensive)
+- ```COT_IMPLEMENTATION_README.md```: Chain-of-Thought implementation guide
 
 
 ### :one: Generalist Training
